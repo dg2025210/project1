@@ -13,7 +13,6 @@ TIMING = (280, 515, 515, 745)
 led = NeoPixel(Pin(cfg.LED_PIN), cfg.NUM_LEDS, timing=TIMING)
 mq2 = ADC(Pin(cfg.MQ2_PIN))
 
-# 10칸 색상
 SLOT_COLORS = [
     (255, 50, 50),    (255, 140, 0),    (255, 230, 0),    (150, 255, 0),
     (0, 220, 0),      (0, 230, 180),    (0, 180, 255),    (60, 80, 255),
@@ -34,10 +33,10 @@ penalties = [
 ]
 
 # 게임 상태
-GAME_IDLE = 0       # 대기
-GAME_BLOWING = 1    # 입김 측정 중 (5초)
-GAME_SPINNING = 2   # 룰렛 회전 중
-GAME_RESULT = 3     # 결과 표시
+GAME_IDLE = 0
+GAME_BLOWING = 1
+GAME_SPINNING = 2
+GAME_RESULT = 3
 
 state = {
     'game_state': GAME_IDLE,
@@ -46,11 +45,9 @@ state = {
     'sensor_diff': 0,
     'spin_count': 0,
     'start_trigger': False,
-    'blow_remaining': 0,    # 남은 측정 시간
-    'blow_power': 0,        # 측정된 입김 강도 (누적)
-    'max_blow': 0,          # 최대 입김값
+    'blow_remaining': 5,
+    'max_blow': 0,
     'baseline': 0,
-    'rotation_angle': 0,    # 룰렛 회전 각도
 }
 
 lock = _thread.allocate_lock()
@@ -78,14 +75,10 @@ def show_pointer(position):
             led[i] = (c[0] // 18, c[1] // 18, c[2] // 18)
     led.write()
 
-def show_countdown(seconds_left, power_level):
-    """카운트다운 중 LED 표시 - 입김 셀수록 LED 밝아짐"""
-    # power_level: 0.0 ~ 1.0
+def show_countdown(power_level):
     num_lit = int(cfg.NUM_LEDS * power_level)
-    
     for i in range(cfg.NUM_LEDS):
         if i < num_lit:
-            # 입김 강도에 따른 색상 (초록 → 노랑 → 빨강)
             if power_level < 0.33:
                 led[i] = (0, 200, 0)
             elif power_level < 0.66:
@@ -93,7 +86,7 @@ def show_countdown(seconds_left, power_level):
             else:
                 led[i] = (255, 50, 0)
         else:
-            led[i] = (5, 5, 20)  # 어두운 파랑
+            led[i] = (5, 5, 20)
     led.write()
 
 def hsv_to_rgb(h, s, v):
@@ -132,11 +125,9 @@ def winner_celebration(slot):
 def connect_wifi():
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
-    
     if not wlan.isconnected():
         print("WiFi 연결 중...")
         wlan.connect(cfg.WIFI_SSID, cfg.WIFI_PASSWORD)
-        
         for i in range(40):
             if wlan.isconnected():
                 break
@@ -145,17 +136,13 @@ def connect_wifi():
                 led[j] = (0, 50, 100) if j == pos else (0, 5, 15)
             led.write()
             time.sleep(0.5)
-        
         if not wlan.isconnected():
             print("WiFi 연결 실패!")
             return None
-    
     ip = wlan.ifconfig()[0]
     print("=" * 45)
-    print("WiFi 연결 성공!  IP:", ip)
-    print("접속:  http://" + ip)
+    print("WiFi 연결!  http://" + ip)
     print("=" * 45)
-    
     for i in range(cfg.NUM_LEDS):
         led[i] = (0, 50, 0)
     led.write()
@@ -164,19 +151,9 @@ def connect_wifi():
     return ip
 
 # ============================================
-# HTML 페이지 (서버에서 직접 그리기 + 자동 새로고침)
+# 메인 페이지 (한 번만 로딩, JS가 갱신)
 # ============================================
 def generate_main_page():
-    with lock:
-        game = state['game_state']
-        current_pos = state['current_pos']
-        last_winner = state['last_winner']
-        sensor_diff = state['sensor_diff']
-        spin_count = state['spin_count']
-        blow_remaining = state['blow_remaining']
-        max_blow = state['max_blow']
-        rotation_angle = state['rotation_angle']
-    
     # 벌칙 입력 폼
     rows = ""
     for i in range(cfg.NUM_LEDS):
@@ -187,135 +164,458 @@ def generate_main_page():
         rows += '<input type="text" name="p' + str(i) + '" value="' + penalties[i] + '" maxlength="50">'
         rows += '</div>'
     
-    # SVG 룰렛 슬라이스
-    svg_slices = ""
-    for i in range(cfg.NUM_LEDS):
-        slice_angle = 36
-        start_angle = (i * slice_angle - 90 - slice_angle/2) * math.pi / 180
-        end_angle = ((i+1) * slice_angle - 90 - slice_angle/2) * math.pi / 180
-        
-        x1 = math.cos(start_angle) * 95
-        y1 = math.sin(start_angle) * 95
-        x2 = math.cos(end_angle) * 95
-        y2 = math.sin(end_angle) * 95
-        
-        c = SLOT_COLORS[i]
-        fill_color = "rgb(%d,%d,%d)" % (c[0], c[1], c[2])
-        
-        # 당첨/회전 중인 칸 강조
-        if (game == GAME_SPINNING and i == current_pos) or (game == GAME_RESULT and i == last_winner):
-            stroke = '#ffffff'
-            stroke_w = '5'
-        else:
-            stroke = '#333'
-            stroke_w = '1'
-        
-        path_d = "M 0 0 L %.1f %.1f A 95 95 0 0 1 %.1f %.1f Z" % (x1, y1, x2, y2)
-        svg_slices += '<path d="' + path_d + '" fill="' + fill_color + '" stroke="' + stroke + '" stroke-width="' + stroke_w + '"/>'
-        
-        # 숫자
-        mid_angle = (i * slice_angle - 90) * math.pi / 180
-        tx = math.cos(mid_angle) * 65
-        ty = math.sin(mid_angle) * 65
-        svg_slices += '<text x="%.1f" y="%.1f" text-anchor="middle" dominant-baseline="middle" fill="white" font-size="22" font-weight="bold">%d</text>' % (tx, ty, i+1)
+    # 색상 JS 배열
+    colors_js = "[" + ",".join(["[%d,%d,%d]" % (c[0], c[1], c[2]) for c in SLOT_COLORS]) + "]"
     
-    # 상태에 따라 화면 구성
-    if game == GAME_IDLE:
-        # 대기 상태
-        status_text = "⏸️ 대기 중"
-        center_box = '<a href="/start" class="start-btn">🎰 START!</a>'
-        message = '🎯 START를 누르고 5초간 입김을 부세요!'
-        message_class = 'waiting'
-        refresh = "2"
-        
-    elif game == GAME_BLOWING:
-        # 입김 측정 중 (5초 카운트다운)
-        status_text = "💨 입김 측정 중! " + str(blow_remaining) + "초 남음"
-        center_box = '<div class="countdown">' + str(blow_remaining) + '</div>'
-        # 입김 강도 시각화
-        power_pct = min(100, (max_blow / 30000) * 100)
-        message = '💨 입김을 세게 부세요!<br>현재 강도: ' + str(int(power_pct)) + '%'
-        message_class = 'blowing'
-        refresh = "0.5"
-        
-    elif game == GAME_SPINNING:
-        # 룰렛 회전 중
-        status_text = "🎰 룰렛 회전 중!"
-        center_box = '<div class="spinning-text">SPIN!</div>'
-        message = '🎰 룰렛이 돌아가고 있어요!<br>두근두근...'
-        message_class = 'spinning'
-        refresh = "0.3"
-        
-    else:  # GAME_RESULT
-        # 결과 표시
-        status_text = "✅ 결과!"
-        center_box = '<a href="/start" class="start-btn">🔄 다시 하기</a>'
-        message = '🎉 ' + str(last_winner + 1) + '번 당첨! 🎉<br>📜 ' + penalties[last_winner]
-        message_class = 'winner'
-        refresh = "5"
+    # 벌칙 JS 배열
+    penalty_items = []
+    for p in penalties:
+        p_safe = p.replace('\\', '\\\\').replace('"', '\\"').replace("'", "\\'")
+        penalty_items.append('"' + p_safe + '"')
+    penalties_js = "[" + ",".join(penalty_items) + "]"
     
-    # 가스 미터
-    gas_pct = min(100, (sensor_diff / 30000) * 100)
-    max_pct = min(100, (max_blow / 30000) * 100)
+    css = '''
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    font-family: -apple-system, sans-serif;
+    background: radial-gradient(circle at center, #2d1b4e, #0f0524);
+    color: white;
+    padding: 15px;
+    min-height: 100vh;
+}
+h1 {
+    text-align: center;
+    font-size: 28px;
+    text-shadow: 0 0 20px #ff00ff;
+    margin-bottom: 5px;
+}
+.subtitle {
+    text-align: center;
+    color: #aaa;
+    font-size: 12px;
+    margin-bottom: 15px;
+}
+.status-top {
+    text-align: center;
+    font-size: 16px;
+    color: #ffd700;
+    font-weight: bold;
+    margin-bottom: 15px;
+    padding: 10px;
+    background: rgba(0,0,0,0.3);
+    border-radius: 10px;
+    transition: all 0.3s;
+}
+.roulette-container {
+    position: relative;
+    width: 320px;
+    height: 320px;
+    margin: 20px auto;
+}
+.roulette-wheel {
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    box-shadow: 0 0 40px rgba(255,0,255,0.5);
+    transition: transform 4s cubic-bezier(0.17, 0.67, 0.21, 1);
+}
+.roulette-wheel svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+.pointer {
+    position: absolute;
+    top: -15px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 0;
+    height: 0;
+    border-left: 20px solid transparent;
+    border-right: 20px solid transparent;
+    border-top: 35px solid #ffd700;
+    filter: drop-shadow(0 0 10px rgba(255,215,0,0.8));
+    z-index: 10;
+}
+.center-circle {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 100px;
+    height: 100px;
+    background: radial-gradient(circle, #fff, #ffd700);
+    border-radius: 50%;
+    box-shadow: 0 0 20px #ffd700;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    font-weight: bold;
+    color: #333;
+    cursor: pointer;
+    transition: transform 0.2s;
+}
+.center-circle:active { transform: translate(-50%, -50%) scale(0.95); }
+.center-circle.countdown {
+    font-size: 50px;
+    color: #ff0066;
+    background: radial-gradient(circle, #fff, #ff99cc);
+}
+.center-circle.spinning {
+    font-size: 22px;
+    color: #ff00ff;
+    animation: pulse 0.5s infinite;
+}
+@keyframes pulse {
+    0%, 100% { transform: translate(-50%, -50%) scale(1); }
+    50% { transform: translate(-50%, -50%) scale(1.1); }
+}
+.message-box {
+    padding: 20px;
+    border-radius: 15px;
+    text-align: center;
+    margin: 20px auto;
+    max-width: 400px;
+    font-size: 17px;
+    font-weight: bold;
+    line-height: 1.5;
+    transition: all 0.4s;
+}
+.message-box.waiting { background: rgba(255,255,255,0.1); color: #ccc; }
+.message-box.blowing { background: linear-gradient(45deg, #11998e, #38ef7d); color: white; }
+.message-box.spinning { background: linear-gradient(45deg, #00f5ff, #ff00ff); color: white; }
+.message-box.winner { background: linear-gradient(135deg, #ff6b6b, #feca57); color: #333; font-size: 20px; box-shadow: 0 5px 25px rgba(255,107,107,0.5); }
+.gas-meter {
+    max-width: 400px;
+    margin: 10px auto;
+    height: 30px;
+    background: rgba(255,255,255,0.1);
+    border-radius: 15px;
+    overflow: hidden;
+    position: relative;
+    display: none;
+}
+.gas-meter.show { display: block; }
+.gas-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #00ff00, #ffff00, #ff0000);
+    width: 0%;
+    transition: width 0.15s;
+}
+.gas-max {
+    position: absolute;
+    left: 0%;
+    top: 0;
+    bottom: 0;
+    width: 3px;
+    background: #fff;
+    transition: left 0.15s;
+}
+.gas-label {
+    text-align: center;
+    font-size: 12px;
+    color: #888;
+    margin-top: 5px;
+    display: none;
+}
+.gas-label.show { display: block; }
+.penalties-section {
+    max-width: 400px;
+    margin: 30px auto 0;
+}
+h2 {
+    font-size: 18px;
+    color: #ffd700;
+    margin-bottom: 10px;
+    text-align: center;
+}
+.slot {
+    background: rgba(255,255,255,0.06);
+    padding: 10px 12px;
+    margin: 8px 0;
+    border-radius: 8px;
+}
+.slot label {
+    display: block;
+    font-weight: bold;
+    margin-bottom: 4px;
+    color: #ffd700;
+    font-size: 12px;
+}
+.slot input {
+    width: 100%;
+    padding: 8px;
+    font-size: 14px;
+    border: none;
+    border-radius: 5px;
+}
+.save-btn {
+    width: 100%;
+    padding: 14px;
+    font-size: 16px;
+    font-weight: bold;
+    background: linear-gradient(45deg, #667eea, #764ba2);
+    color: white;
+    border: none;
+    border-radius: 10px;
+    margin-top: 12px;
+    cursor: pointer;
+}
+.live-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    background: #ff0000;
+    border-radius: 50%;
+    animation: blink 1s infinite;
+    vertical-align: middle;
+}
+@keyframes blink {
+    50% { opacity: 0.3; }
+}
+.count-info {
+    text-align: center;
+    font-size: 12px;
+    color: #888;
+    margin: 10px 0;
+}
+'''
     
+    # JavaScript (별도, f-string 안 씀)
+    js = '''
+var colors = __COLORS__;
+var penalties = __PENALTIES__;
+var NUM_SLOTS = 10;
+
+// 룰렛 SVG 생성 (한 번만!)
+var svg = document.getElementById('wheelSvg');
+var sliceAngle = 360 / NUM_SLOTS;
+
+for (var i = 0; i < NUM_SLOTS; i++) {
+    var startAngle = (i * sliceAngle - 90 - sliceAngle/2) * Math.PI / 180;
+    var endAngle = ((i+1) * sliceAngle - 90 - sliceAngle/2) * Math.PI / 180;
+    
+    var x1 = Math.cos(startAngle) * 95;
+    var y1 = Math.sin(startAngle) * 95;
+    var x2 = Math.cos(endAngle) * 95;
+    var y2 = Math.sin(endAngle) * 95;
+    
+    var c = colors[i];
+    var path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    var d = 'M 0 0 L ' + x1 + ' ' + y1 + ' A 95 95 0 0 1 ' + x2 + ' ' + y2 + ' Z';
+    path.setAttribute('d', d);
+    path.setAttribute('fill', 'rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')');
+    path.setAttribute('stroke', '#333');
+    path.setAttribute('stroke-width', '1');
+    path.setAttribute('id', 'slice' + i);
+    svg.appendChild(path);
+    
+    var midAngle = (i * sliceAngle - 90) * Math.PI / 180;
+    var tx = Math.cos(midAngle) * 65;
+    var ty = Math.sin(midAngle) * 65;
+    var text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    text.setAttribute('x', tx);
+    text.setAttribute('y', ty);
+    text.setAttribute('text-anchor', 'middle');
+    text.setAttribute('dominant-baseline', 'middle');
+    text.setAttribute('fill', 'white');
+    text.setAttribute('font-size', '22');
+    text.setAttribute('font-weight', 'bold');
+    text.textContent = (i + 1);
+    svg.appendChild(text);
+}
+
+var wheel = document.getElementById('wheel');
+var currentRotation = 0;
+var lastGameState = -1;
+var lastWinner = -1;
+var spinAnimationStarted = false;
+
+// START 버튼 클릭
+function startGame() {
+    fetch('/start');
+}
+
+// 룰렛 빠른 회전 (입김 측정 중에는 부드럽게 살짝 흔들기)
+function startFastSpin() {
+    wheel.style.transition = 'transform 0.1s linear';
+    var interval = setInterval(function() {
+        currentRotation += 72;
+        wheel.style.transform = 'rotate(' + currentRotation + 'deg)';
+    }, 80);
+    wheel._spinInterval = interval;
+}
+
+function stopSpinAndLand(targetPos) {
+    if (wheel._spinInterval) {
+        clearInterval(wheel._spinInterval);
+        wheel._spinInterval = null;
+    }
+    // 부드럽게 결과 위치로
+    var targetAngle = -(targetPos * 36);
+    var currentMod = currentRotation % 360;
+    var diff = targetAngle - currentMod;
+    if (diff > 0) diff -= 360;
+    var finalRotation = currentRotation + (3 * 360) + diff;
+    
+    wheel.style.transition = 'transform 3s cubic-bezier(0.17, 0.67, 0.21, 1)';
+    wheel.style.transform = 'rotate(' + finalRotation + 'deg)';
+    currentRotation = finalRotation;
+}
+
+// 슬라이스 강조 효과
+function highlightSlice(index, highlight) {
+    var slice = document.getElementById('slice' + index);
+    if (!slice) return;
+    if (highlight) {
+        slice.setAttribute('stroke', '#ffffff');
+        slice.setAttribute('stroke-width', '5');
+    } else {
+        slice.setAttribute('stroke', '#333');
+        slice.setAttribute('stroke-width', '1');
+    }
+}
+
+function clearAllHighlights() {
+    for (var i = 0; i < NUM_SLOTS; i++) {
+        highlightSlice(i, false);
+    }
+}
+
+// 0.3초마다 상태 가져오기
+function updateUI() {
+    fetch('/status').then(function(res) {
+        return res.json();
+    }).then(function(data) {
+        var gameState = data.game_state;
+        var statusEl = document.getElementById('statusTop');
+        var centerEl = document.getElementById('centerCircle');
+        var messageEl = document.getElementById('messageBox');
+        var gasMeterEl = document.getElementById('gasMeter');
+        var gasLabelEl = document.getElementById('gasLabel');
+        var countEl = document.getElementById('countInfo');
+        
+        // 카운트 정보
+        countEl.textContent = '총 게임 횟수: ' + data.spin_count + '회';
+        
+        // 게임 상태별 처리
+        if (gameState === 0) {
+            // IDLE - 대기
+            statusEl.textContent = '⏸️ 대기 중';
+            centerEl.className = 'center-circle';
+            centerEl.innerHTML = '🎰<br>START!';
+            centerEl.onclick = startGame;
+            messageEl.className = 'message-box waiting';
+            messageEl.innerHTML = '🎯 START를 누르고<br>5초간 입김을 부세요!';
+            gasMeterEl.classList.remove('show');
+            gasLabelEl.classList.remove('show');
+            clearAllHighlights();
+            
+        } else if (gameState === 1) {
+            // BLOWING - 입김 측정 중
+            statusEl.textContent = '💨 입김 측정 중!';
+            centerEl.className = 'center-circle countdown';
+            centerEl.innerHTML = data.blow_remaining;
+            centerEl.onclick = null;
+            messageEl.className = 'message-box blowing';
+            messageEl.innerHTML = '💨 입김을 세게 부세요!<br>최대: ' + data.max_blow;
+            
+            // 가스 미터 표시
+            gasMeterEl.classList.add('show');
+            gasLabelEl.classList.add('show');
+            var pct = Math.min(100, (data.sensor_diff / 30000) * 100);
+            var maxPct = Math.min(100, (data.max_blow / 30000) * 100);
+            document.getElementById('gasFill').style.width = pct + '%';
+            document.getElementById('gasMax').style.left = maxPct + '%';
+            gasLabelEl.innerHTML = '💨 현재: ' + data.sensor_diff + ' | 최대: ' + data.max_blow;
+            
+        } else if (gameState === 2) {
+            // SPINNING - 룰렛 회전 중
+            statusEl.textContent = '🎰 룰렛 회전 중!';
+            centerEl.className = 'center-circle spinning';
+            centerEl.innerHTML = 'SPIN!';
+            centerEl.onclick = null;
+            messageEl.className = 'message-box spinning';
+            messageEl.innerHTML = '🎰 룰렛이 돌아가요!<br>두근두근...';
+            gasMeterEl.classList.remove('show');
+            gasLabelEl.classList.remove('show');
+            
+            // 빠른 회전 시작 (처음 한 번만)
+            if (!spinAnimationStarted) {
+                spinAnimationStarted = true;
+                lastWinner = -1;
+                startFastSpin();
+            }
+            
+            // 현재 위치 강조
+            clearAllHighlights();
+            highlightSlice(data.current_pos, true);
+            
+        } else if (gameState === 3) {
+            // RESULT - 결과
+            statusEl.textContent = '✅ 결과 발표!';
+            centerEl.className = 'center-circle';
+            centerEl.innerHTML = '🔄<br>다시!';
+            centerEl.onclick = startGame;
+            messageEl.className = 'message-box winner';
+            messageEl.innerHTML = '🎉 ' + (data.last_winner + 1) + '번 당첨! 🎉<br>📜 ' + penalties[data.last_winner];
+            gasMeterEl.classList.remove('show');
+            gasLabelEl.classList.remove('show');
+            
+            // 처음 결과 받았을 때 회전 멈추기
+            if (lastWinner !== data.last_winner) {
+                lastWinner = data.last_winner;
+                if (spinAnimationStarted) {
+                    spinAnimationStarted = false;
+                    stopSpinAndLand(data.last_winner);
+                }
+                // 당첨 칸 강조
+                setTimeout(function() {
+                    clearAllHighlights();
+                    highlightSlice(data.last_winner, true);
+                }, 3000);
+            }
+        }
+        
+        lastGameState = gameState;
+    }).catch(function(e) {
+        console.error(e);
+    });
+}
+
+// 0.3초마다 갱신
+setInterval(updateUI, 300);
+updateUI();
+'''
+    
+    js = js.replace("__COLORS__", colors_js)
+    js = js.replace("__PENALTIES__", penalties_js)
+    
+    # HTML 조립
     html = '<!DOCTYPE html><html><head><meta charset="utf-8">'
     html += '<meta name="viewport" content="width=device-width, initial-scale=1.0">'
-    html += '<meta http-equiv="refresh" content="' + refresh + '">'
     html += '<title>운명의 룰렛</title>'
-    html += '<style>'
-    html += '* { box-sizing: border-box; margin: 0; padding: 0; }'
-    html += 'body { font-family: sans-serif; background: radial-gradient(circle at center, #2d1b4e, #0f0524); color: white; padding: 15px; min-height: 100vh; }'
-    html += 'h1 { text-align: center; font-size: 28px; text-shadow: 0 0 20px #ff00ff; margin-bottom: 5px; }'
-    html += '.subtitle { text-align: center; color: #aaa; font-size: 12px; margin-bottom: 15px; }'
-    html += '.status-top { text-align: center; font-size: 16px; color: #ffd700; font-weight: bold; margin-bottom: 15px; padding: 10px; background: rgba(0,0,0,0.3); border-radius: 10px; }'
-    html += '.roulette-container { position: relative; width: 320px; height: 320px; margin: 20px auto; }'
-    html += '.roulette-wheel { width: 100%; height: 100%; border-radius: 50%; box-shadow: 0 0 40px rgba(255,0,255,0.5); transform: rotate(' + str(rotation_angle) + 'deg); transition: transform 0.3s ease-out; }'
-    html += '.roulette-wheel svg { width: 100%; height: 100%; display: block; }'
-    html += '.pointer { position: absolute; top: -15px; left: 50%; transform: translateX(-50%); width: 0; height: 0; border-left: 20px solid transparent; border-right: 20px solid transparent; border-top: 35px solid #ffd700; filter: drop-shadow(0 0 10px rgba(255,215,0,0.8)); z-index: 10; }'
-    html += '.center-circle { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 80px; height: 80px; background: radial-gradient(circle, #fff, #ffd700); border-radius: 50%; box-shadow: 0 0 20px #ffd700; z-index: 5; display: flex; align-items: center; justify-content: center; font-size: 28px; font-weight: bold; color: #333; }'
-    html += '.countdown { font-size: 40px; color: #ff0066; }'
-    html += '.spinning-text { font-size: 22px; color: #ff00ff; animation: pulse 0.5s infinite; }'
-    html += '@keyframes pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.1); } }'
-    html += '.start-btn { display: block; width: 90%; max-width: 350px; margin: 20px auto; padding: 20px; font-size: 22px; font-weight: bold; background: linear-gradient(45deg, #ff006e, #ff8a00, #ffce00); color: white; border: none; border-radius: 50px; text-decoration: none; text-align: center; box-shadow: 0 5px 25px rgba(255,0,110,0.5); }'
-    html += '.center-circle .start-btn { width: auto; margin: 0; padding: 8px 16px; font-size: 14px; border-radius: 20px; }'
-    html += '.message-box { padding: 20px; border-radius: 15px; text-align: center; margin: 20px auto; max-width: 400px; font-size: 17px; font-weight: bold; line-height: 1.5; }'
-    html += '.message-box.waiting { background: rgba(255,255,255,0.1); color: #ccc; }'
-    html += '.message-box.blowing { background: linear-gradient(45deg, #11998e, #38ef7d); color: white; animation: pulse 0.6s infinite; }'
-    html += '.message-box.spinning { background: linear-gradient(45deg, #00f5ff, #ff00ff); color: white; animation: pulse 0.5s infinite; }'
-    html += '.message-box.winner { background: linear-gradient(135deg, #ff6b6b, #feca57); color: #333; font-size: 20px; box-shadow: 0 5px 25px rgba(255,107,107,0.5); }'
-    html += '.gas-meter { max-width: 400px; margin: 10px auto; height: 30px; background: rgba(255,255,255,0.1); border-radius: 15px; overflow: hidden; position: relative; }'
-    html += '.gas-fill { height: 100%; background: linear-gradient(90deg, #00ff00, #ffff00, #ff0000); width: ' + str(gas_pct) + '%; transition: width 0.3s; }'
-    html += '.gas-max { position: absolute; left: ' + str(max_pct) + '%; top: 0; bottom: 0; width: 3px; background: #fff; }'
-    html += '.gas-label { text-align: center; font-size: 12px; color: #888; margin-top: 5px; }'
-    html += '.penalties-section { max-width: 400px; margin: 30px auto 0; }'
-    html += 'h2 { font-size: 18px; color: #ffd700; margin-bottom: 10px; text-align: center; }'
-    html += '.slot { background: rgba(255,255,255,0.06); padding: 10px 12px; margin: 8px 0; border-radius: 8px; }'
-    html += '.slot label { display: block; font-weight: bold; margin-bottom: 4px; color: #ffd700; font-size: 12px; }'
-    html += '.slot input { width: 100%; padding: 8px; font-size: 14px; border: none; border-radius: 5px; }'
-    html += '.save-btn { width: 100%; padding: 14px; font-size: 16px; font-weight: bold; background: linear-gradient(45deg, #667eea, #764ba2); color: white; border: none; border-radius: 10px; margin-top: 12px; }'
-    html += '.live-dot { display: inline-block; width: 8px; height: 8px; background: #ff0000; border-radius: 50%; animation: blink 1s infinite; vertical-align: middle; }'
-    html += '@keyframes blink { 50% { opacity: 0.3; } }'
-    html += '.count-info { text-align: center; font-size: 12px; color: #888; margin: 10px 0; }'
-    html += '</style></head><body>'
+    html += '<style>' + css + '</style>'
+    html += '</head><body>'
     
     html += '<h1>🎰 운명의 룰렛 🎰</h1>'
-    html += '<p class="subtitle"><span class="live-dot"></span> 자동 새로고침 중 | MQ-2 + WS2813</p>'
-    html += '<div class="status-top">' + status_text + '</div>'
+    html += '<p class="subtitle"><span class="live-dot"></span> LIVE | MQ-2 + WS2813</p>'
+    html += '<div class="status-top" id="statusTop">⏸️ 대기 중</div>'
     
     html += '<div class="roulette-container">'
     html += '<div class="pointer"></div>'
-    html += '<div class="roulette-wheel"><svg viewBox="-100 -100 200 200">' + svg_slices + '</svg></div>'
-    html += '<div class="center-circle">' + center_box + '</div>'
+    html += '<div class="roulette-wheel" id="wheel"><svg id="wheelSvg" viewBox="-100 -100 200 200"></svg></div>'
+    html += '<div class="center-circle" id="centerCircle" onclick="startGame()">🎰<br>START!</div>'
     html += '</div>'
     
-    html += '<div class="message-box ' + message_class + '">' + message + '</div>'
+    html += '<div class="message-box waiting" id="messageBox">🎯 START를 누르고<br>5초간 입김을 부세요!</div>'
     
-    # 입김 측정 중일 때만 강도 표시
-    if game == GAME_BLOWING:
-        html += '<div class="gas-meter"><div class="gas-fill"></div><div class="gas-max"></div></div>'
-        html += '<div class="gas-label">💨 현재: ' + str(sensor_diff) + ' | 최대: ' + str(max_blow) + '</div>'
+    html += '<div class="gas-meter" id="gasMeter"><div class="gas-fill" id="gasFill"></div><div class="gas-max" id="gasMax"></div></div>'
+    html += '<div class="gas-label" id="gasLabel"></div>'
     
-    html += '<div class="count-info">총 게임 횟수: ' + str(spin_count) + '회</div>'
+    html += '<div class="count-info" id="countInfo">총 게임 횟수: 0회</div>'
     
     html += '<div class="penalties-section">'
     html += '<h2>📝 벌칙 설정</h2>'
@@ -324,6 +624,7 @@ def generate_main_page():
     html += '<button type="submit" class="save-btn">💾 저장하기</button>'
     html += '</form></div>'
     
+    html += '<script>' + js + '</script>'
     html += '</body></html>'
     return html
 
@@ -360,7 +661,7 @@ def parse_post(body):
     return data
 
 # ============================================
-# 웹 서버 (Core 1)
+# 웹 서버
 # ============================================
 def web_server_thread():
     global penalties
@@ -379,12 +680,27 @@ def web_server_thread():
             request = cl.recv(2048).decode('utf-8')
             first_line = request.split('\r\n')[0]
             
-            # START 버튼
-            if 'GET /start' in first_line:
+            # 상태 JSON API
+            if 'GET /status' in first_line:
+                with lock:
+                    json_data = '{'
+                    json_data += '"game_state":' + str(state["game_state"]) + ','
+                    json_data += '"current_pos":' + str(state["current_pos"]) + ','
+                    json_data += '"last_winner":' + str(state["last_winner"]) + ','
+                    json_data += '"sensor_diff":' + str(state["sensor_diff"]) + ','
+                    json_data += '"max_blow":' + str(state["max_blow"]) + ','
+                    json_data += '"blow_remaining":' + str(state["blow_remaining"]) + ','
+                    json_data += '"spin_count":' + str(state["spin_count"])
+                    json_data += '}'
+                cl.send('HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n')
+                cl.send(json_data)
+            
+            # START 트리거
+            elif 'GET /start' in first_line:
                 with lock:
                     if state['game_state'] in (GAME_IDLE, GAME_RESULT):
                         state['start_trigger'] = True
-                cl.send('HTTP/1.0 303 See Other\r\nLocation: /\r\n\r\n')
+                cl.send('HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\nOK')
             
             # 벌칙 저장
             elif 'POST /save' in first_line:
@@ -414,15 +730,15 @@ def web_server_thread():
                 pass
 
 # ============================================
-# 입김 측정 (5초)
+# 게임 로직
 # ============================================
 def measure_blow(baseline):
-    """5초간 입김 측정, 최대값 반환"""
     print("\n💨 입김 측정 시작! (5초)")
     
     with lock:
         state['game_state'] = GAME_BLOWING
         state['max_blow'] = 0
+        state['blow_remaining'] = 5
     
     max_blow = 0
     start_time = time.ticks_ms()
@@ -434,61 +750,46 @@ def measure_blow(baseline):
         if elapsed >= 5000:
             break
         
-        # 센서 읽기
         gas_value = mq2.read_u16()
         diff = max(0, gas_value - baseline)
         
         if diff > max_blow:
             max_blow = diff
         
-        # 현재 강도에 따라 LED 표시
         power_level = min(diff / 30000, 1.0)
-        show_countdown(remaining, power_level)
+        show_countdown(power_level)
         
-        # 상태 업데이트
         with lock:
             state['sensor_diff'] = diff
             state['max_blow'] = max_blow
-            state['blow_remaining'] = remaining
+            state['blow_remaining'] = max(0, remaining)
         
         time.sleep(0.05)
     
     print("측정 완료! 최대 입김:", max_blow)
     return max_blow
 
-# ============================================
-# 룰렛 회전
-# ============================================
 def spin_roulette(power):
-    """power: 0.0 ~ 1.0"""
     print("🎰 룰렛 회전! 파워:", round(power, 2))
     
     with lock:
         state['game_state'] = GAME_SPINNING
         state['spin_count'] += 1
     
-    # 회전 횟수 = 최소 20 ~ 최대 100 스텝
     total_steps = int(20 + power * 80)
     position = random.randint(0, cfg.NUM_LEDS - 1)
-    accumulated_angle = 0
     
     for step in range(total_steps):
         position = (position + 1) % cfg.NUM_LEDS
         show_pointer(position)
         
-        # 회전 각도 누적 (시각용)
-        accumulated_angle += 36
-        
         with lock:
             state['current_pos'] = position
-            state['rotation_angle'] = accumulated_angle
         
-        # 감속
         progress = step / total_steps
         delay = 0.04 + (progress ** 2.5) * 0.5
         time.sleep(delay)
     
-    # 당첨!
     with lock:
         state['last_winner'] = position
         state['game_state'] = GAME_RESULT
@@ -501,9 +802,6 @@ def spin_roulette(power):
     winner_celebration(position)
     show_pointer(position)
 
-# ============================================
-# 센서 캘리브레이션
-# ============================================
 def calibrate():
     print("MQ-2 센서 예열 중...")
     samples = []
@@ -522,7 +820,7 @@ def calibrate():
 # 메인
 # ============================================
 def main():
-    print("\n=== 운명의 룰렛 (5초 입김 측정 버전) ===\n")
+    print("\n=== 운명의 룰렛 ===\n")
     
     ip = connect_wifi()
     if not ip:
@@ -536,44 +834,30 @@ def main():
         state['baseline'] = baseline
     
     show_idle()
-    
-    print("\n웹에서 START 버튼을 누르세요!")
-    print("URL: http://" + ip + "\n")
+    print("\nSTART 버튼을 누르세요!  http://" + ip + "\n")
     
     while True:
         with lock:
             start_trigger = state['start_trigger']
             current_game = state['game_state']
         
-        # START 버튼 눌림!
         if start_trigger and current_game in (GAME_IDLE, GAME_RESULT):
             with lock:
                 state['start_trigger'] = False
             
-            # 1. 5초간 입김 측정
             max_blow = measure_blow(baseline)
-            
-            # 2. 입김 강도를 0~1로 정규화
-            # 30000 이상이면 최대 (조절 가능)
             power = min(max_blow / 30000, 1.0)
-            
-            # 너무 약하면 최소 회전 보장
             if power < 0.1:
                 power = 0.1
-                print("입김이 약해서 최소로 회전!")
             
-            # 3. 룰렛 회전
             spin_roulette(power)
             
-            # 4. 결과 표시 후 5초 대기
             time.sleep(5)
             
             with lock:
                 state['game_state'] = GAME_IDLE
             show_idle()
-            print("\n다시 START 버튼을 눌러주세요!\n")
-        
-        # 평상시엔 센서값만 업데이트
+            print("\nSTART 버튼을 다시 눌러주세요!\n")
         else:
             gas_value = mq2.read_u16()
             diff = max(0, gas_value - baseline)
