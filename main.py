@@ -400,40 +400,63 @@ def web_server():
     print("🌐 웹 서버 시작!")
     
     while True:
+        cl = None
         try:
-            cl, _ = s.accept()
-            cl.settimeout(3.0)
-            req = cl.recv(2048).decode('utf-8')
-            first_line = req.split('\r\n')[0]
+            cl, addr = s.accept()
+            cl.settimeout(5.0)
+            
+            # 요청 읽기
+            req = b''
+            try:
+                req = cl.recv(2048)
+            except OSError:
+                cl.close()
+                continue
+            
+            if not req:
+                cl.close()
+                continue
+            
+            try:
+                req_str = req.decode('utf-8')
+            except:
+                cl.close()
+                continue
+            
+            first_line = req_str.split('\r\n')[0]
             parts = first_line.split(' ')
             method = parts[0] if len(parts) > 0 else ''
             path = parts[1] if len(parts) > 1 else '/'
             
-            # 1. /start - 게임 시작
+            # ===== /start =====
             if path.startswith('/start'):
                 print(">>> START 요청 받음!")
                 with lock:
                     print("   현재 게임 상태:", game_state)
                     if game_state == 0 or game_state == 3:
                         trigger = True
-                        print("   ✅ 트리거 설정 완료!")
+                        print("   ✅ 트리거 설정!")
                     else:
-                        print("   ⚠️ 진행 중이라 무시")
-                cl.send('HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\nOK')
+                        print("   ⚠️ 진행 중")
+                try:
+                    cl.send(b'HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nOK')
+                except: pass
             
-            # 2. /status - 상태 JSON
+            # ===== /status =====
             elif path.startswith('/status'):
                 with lock:
                     j = '{"g":%d,"pos":%d,"win":%d,"diff":%d,"mx":%d,"rem":%d,"cnt":%d}' % (
                         game_state, current_pos, last_winner, sensor_diff,
                         max_blow, blow_rem, spin_cnt)
-                cl.send('HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n')
-                cl.send(j)
+                try:
+                    cl.send(b'HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n')
+                    cl.send(j.encode('utf-8'))
+                except: pass
             
-            # 3. /save - 벌칙 저장
+            # ===== /save =====
             elif method == 'POST' and '/save' in path:
-                if '\r\n\r\n' in req:
-                    body = req.split('\r\n\r\n', 1)[1]
+                if '\r\n\r\n' in req_str:
+                    body = req_str.split('\r\n\r\n', 1)[1]
                     data = parse_post(body)
                     try:
                         n = int(data.get('n', '0'))
@@ -444,32 +467,38 @@ def web_server():
                         for i in range(n):
                             k = 'p' + str(i)
                             val = data.get(k, '벌칙').strip()
-                            if not val:
-                                val = '벌칙'
+                            if not val: val = '벌칙'
                             new_pen.append(val)
                         with lock:
                             penalties = new_pen
                             last_winner = -1
                             if game_state == 3:
                                 game_state = 0
-                        print("📝 벌칙 저장됨! 개수:", n)
-                cl.send('HTTP/1.0 200 OK\r\n\r\nOK')
+                        print("📝 벌칙 저장:", n, "개")
+                try:
+                    cl.send(b'HTTP/1.0 200 OK\r\nConnection: close\r\n\r\nOK')
+                except: pass
             
-            # 4. 메인 페이지
+            # ===== 메인 페이지 =====
             else:
                 html = make_page()
-                cl.send('HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n')
-                chunk = 1024
-                for i in range(0, len(html), chunk):
-                    cl.send(html[i:i+chunk])
+                try:
+                    cl.send(b'HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n')
+                    chunk = 512
+                    for i in range(0, len(html), chunk):
+                        cl.send(html[i:i+chunk].encode('utf-8'))
+                except: pass
             
-            cl.close()
-        except Exception as e:
-            print("서버 에러:", e)
-            try:
-                cl.close()
-            except:
+        except OSError as e:
+            # 타임아웃은 무시 (정상)
+            if e.args[0] != 110:  # ETIMEDOUT
                 pass
+        except Exception as e:
+            pass
+        finally:
+            if cl:
+                try: cl.close()
+                except: pass
 
 # ===== 게임 함수 =====
 def measure_blow():
